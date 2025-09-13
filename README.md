@@ -1,4 +1,136 @@
+
 # nginx-modsec-setup
+
+📘 Nginx + ModSecurity v3 + OWASP CRS Installation Guide
+1. Install dependencies
+sudo apt update && sudo apt install -y \
+    git g++ flex bison cmake make \
+    libtool automake autoconf pkg-config \
+    libpcre3 libpcre3-dev libxml2 libxml2-dev \
+    libyajl-dev libssl-dev doxygen zlib1g zlib1g-dev
+
+2. Build and install ModSecurity v3 (library)
+cd /usr/local/src
+git clone --depth 1 https://github.com/SpiderLabs/ModSecurity
+cd ModSecurity
+git submodule init
+git submodule update
+./build.sh
+./configure
+make
+sudo make install
+
+3. Build Nginx with ModSecurity connector
+cd /usr/local/src
+git clone --depth 1 https://github.com/SpiderLabs/ModSecurity-nginx.git
+wget http://nginx.org/download/nginx-1.26.2.tar.gz
+tar -xvzf nginx-1.26.2.tar.gz
+cd nginx-1.26.2
+
+./configure --with-compat --add-dynamic-module=../ModSecurity-nginx
+make modules
+
+
+Copy module:
+
+sudo mkdir -p /etc/nginx/modules
+sudo cp objs/ngx_http_modsecurity_module.so /etc/nginx/modules/
+
+4. Enable module in Nginx
+
+Edit /etc/nginx/nginx.conf and add at the very top:
+
+load_module /etc/nginx/modules/ngx_http_modsecurity_module.so;
+
+5. Configure ModSecurity
+sudo mkdir -p /etc/nginx/modsec
+cd /etc/nginx/modsec
+
+
+Create modsecurity.conf:
+
+# Enable ModSecurity
+SecRuleEngine On
+
+# Audit logging
+SecAuditEngine On
+SecAuditLog /var/log/modsec_audit.log
+SecAuditLogFormat JSON
+SecAuditLogParts ABIJDEFHZ
+SecAuditLogType Serial
+
+# Debug log (optional)
+SecDebugLog /var/log/modsec_debug.log
+SecDebugLogLevel 0
+
+# Request/Response settings
+SecRequestBodyAccess On
+SecRequestBodyLimit 13107200
+SecRequestBodyNoFilesLimit 131072
+SecRequestBodyLimitAction Reject
+SecResponseBodyAccess Off
+
+# Load CRS
+Include /etc/nginx/modsec/crs/crs-setup.conf
+Include /etc/nginx/modsec/crs/rules/*.conf
+
+# Disabled rules (optional)
+Include /etc/nginx/modsec/disabled_rules.conf
+
+6. Install OWASP CRS
+cd /etc/nginx/modsec
+git clone --depth 1 https://github.com/coreruleset/coreruleset crs
+mv crs/crs-setup.conf.example crs/crs-setup.conf
+touch disabled_rules.conf
+
+7. Enable ModSecurity in Nginx server block
+
+In your nginx.conf or virtual host:
+
+server {
+    listen 80;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;  # your backend service
+        modsecurity on;
+        modsecurity_rules_file /etc/nginx/modsec/modsecurity.conf;
+    }
+}
+
+8. Test & restart
+sudo nginx -t
+sudo systemctl restart nginx
+
+9. Verify ModSecurity
+
+Test rules:
+
+curl -A "sqlmap" http://localhost/ -i
+curl "http://localhost/?testparam=<script>" -i
+curl "http://localhost/?p=../etc/passwd" -i
+
+
+Expected: 403 Forbidden.
+
+10. View logs
+# Audit logs (JSON if configured)
+cat /var/log/modsec_audit.log
+
+# Debug logs
+cat /var/log/modsec_debug.log
+
+
+✅ At this point you have:
+
+Nginx 1.26.2 built with ModSecurity v3 dynamic module
+
+OWASP CRS loaded and active
+
+Requests like SQLi, XSS, LFI blocked with 403 Forbidden
+
+Audit logs stored in /var/log/modsec_audit.log
+
+### post set up testing with pyton script ####
 
 ## ⚙️ Dependencies & Setup Notes
 

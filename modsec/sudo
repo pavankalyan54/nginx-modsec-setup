@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# Test ModSecurity with various attack scenarios
+# Run as root: sudo ./test_modsecurity_scenarios.sh
+
+# Variables
+SERVER="http://localhost"
+LOG_DIR="/var/log/modsec"
+AUDIT_LOG="${LOG_DIR}/audit.log"
+ERROR_LOG="/var/log/nginx/error.log"
+DEBUG_LOG="${LOG_DIR}/debug.log"
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Ensure logs exist and are writable
+[ -d "$LOG_DIR" ] || sudo mkdir -p "$LOG_DIR"
+[ -f "$AUDIT_LOG" ] || sudo touch "$AUDIT_LOG"
+[ -f "$ERROR_LOG" ] || sudo touch "$ERROR_LOG"
+[ -f "$DEBUG_LOG" ] || sudo touch "$DEBUG_LOG"
+sudo chown -R www-data:www-data "$LOG_DIR"
+sudo chmod 664 "$AUDIT_LOG" "$ERROR_LOG" "$DEBUG_LOG"
+
+# Clear logs for fresh test (optional, comment if unwanted)
+sudo truncate -s 0 "$AUDIT_LOG" "$ERROR_LOG" "$DEBUG_LOG"
+
+# Reload Nginx to ensure latest config
+sudo nginx -t && sudo systemctl reload nginx
+
+# Function to send request and check logs
+test_attack() {
+    local payload="$1"
+    local desc="$2"
+    local expected_ids="$3"
+    local url="${SERVER}/?param=${payload// /%20}"  # URL-encode spaces
+    echo "Testing: $desc"
+    echo "Payload: $url"
+    curl -s -o /dev/null "$url"
+    sleep 2  # Allow log write
+    local audit_entry=$(sudo tail -n 20 "$AUDIT_LOG" | grep -A 15 "H--")
+    local error_entry=$(sudo tail -n 10 "$ERROR_LOG" | grep "ModSecurity")
+    local debug_entry=$(sudo tail -n 20 "$DEBUG_LOG" | grep -i "id:${expected_ids// /\|id:}")
+
+    if [[ -n "$audit_entry" && "$audit_entry" =~ $expected_ids ]]; then
+        echo "SUCCESS: Detected in audit log - $expected_ids"
+    else
+        echo "FAIL: No match in audit log for $expected_ids"
+    fi
+    if [[ -n "$error_entry" && "$error_entry" =~ $expected_ids ]]; then
+        echo "SUCCESS: Detected in error log - $expected_ids"
+    else
+        echo "FAIL: No match in error log for $expected_ids"
+    fi
+    if [[ -n "$debug_entry" ]]; then
+        echo "DEBUG: Rule evaluation found - $debug_entry"
+    else
+        echo "DEBUG: No rule evaluation logged"
+    fi
+    echo "-------------------"
+}
+
+# Test Scenarios (OWASP CRS v3.3.x PL1 triggers)
+test_attack "<script>alert('CRS+XSS+Test')</script>" "Cross-Site Scripting (XSS)" "941100|941110|949110"
+test_attack "1' OR '1'='1" "SQL Injection (OR clause)" "942100|949110"
+test_attack "admin' --" "SQL Injection (Auth Bypass)" "942340|949110"
+test_attack "../../etc/passwd" "Local File Inclusion (LFI)" "930100|949110"
+test_attack "http://malicious.com/shell.php" "Remote File Inclusion (RFI)" "931100|949110"
+test_attack "<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]" "XML External Entity (XXE)" "932100|949110"
+test_attack "'; DROP TABLE users; --" "SQL Injection (Drop Table)" "942130|949110"
+test_attack "eval(base64_decode('cGF5bG9hZA=='))" "Remote Code Execution (RCE) - PHP" "932120|949110"
+test_attack "%00" "Null Byte Injection" "933100|949110"
+test_attack "<img src=x onerror=prompt(1)>" "XSS (Img OnError)" "941160|949110"
+
+# Final check
+echo "Test completed at $TIMESTAMP IST. Review logs for details:"
+echo "Audit Log: sudo tail -n 50 $AUDIT_LOG"
+echo "Error Log: sudo tail -n 10 $ERROR_LOG"
+echo "Debug Log: sudo tail -n 50 $DEBUG_LOG"
